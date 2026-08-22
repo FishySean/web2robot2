@@ -9,7 +9,7 @@
 **所有模块共通的最后一步：出片，用眼睛看。** 指标 ≠ 画面。
 
 ```bash
-envs/rt_env/bin/python -m unittest discover -s tests -v     # 秒级，全套 175 个用例
+envs/rt_env/bin/python -m unittest discover -s tests -v     # 秒级，全套 392 个用例
 ```
 
 ---
@@ -18,6 +18,7 @@ envs/rt_env/bin/python -m unittest discover -s tests -v     # 秒级，全套 17
 
 | 改了什么 | 判据 | 为什么是这个判据 |
 |---|---|---|
+| ⓿取原始画面 | **逐帧核对内容**（不只核对帧数）+ 三条对齐判据出数字 | 帧数对而整段错位一帧，是这一档唯一致命的失效方式 |
 | ①质检 / ②路由 | **判决字段逐字一致** + 每个信号没越阈 | GPU 上的 KeypointRCNN 不是逐位确定的 |
 | 质检/路由整档跳过 | builtin 档同上，**skip 档要求逐字节相同** | skip 不加载任何模型，那一档是纯确定的 |
 | ③感知前端 | 单测（注入假 callable）+ 冻结值比对 | 前端要 GPU，但算术部分可以纯 numpy 测 |
@@ -26,6 +27,58 @@ envs/rt_env/bin/python -m unittest discover -s tests -v     # 秒级，全套 17
 | M7 机器人定义 | 两个验收脚本输出逐字节一致 | 资产是静态的，任何变化都该是有意的 |
 | 新加一台机器人 | 生成脚本七步自检 + **表 vs 自己的 MJCF** + 老机器人逐字节不变 | 两台同构机器人之间不许互当真源，见下 |
 | `evidence/` 里的数 | 断言**具体数值**，不是大于小于 | 防的是论文数字和证据脱钩 |
+
+---
+
+## ⓿取原始画面（`src/web2robot/fetch/`，2026-08-23）
+
+这一档的失效方式很特殊：**帧数永远是对的**（目标时间轴长度就是 `n_frames`），错的是
+"第 i 帧到底是源视频的哪一帧"。错开一帧，后面视觉合成贴上去的机器人手就和画面里的手
+不在同一时刻，而任何"数一数帧数"的检查都发现不了。所以判据是**内容级**的。
+
+```bash
+envs/rt_env/bin/python -m unittest tests.test_fetch_rgb -v      # 27 个用例，约 6 秒
+```
+
+三件事被钉住：
+
+1. **取的是对的那一帧。** 造一支每帧亮度 = 帧号 × 4 的源视频，截完逐帧核对亮度，
+   同时核对 `frames_index.json` 里记的 `source_frame` 是否等于 `t_target × fps_src`
+   （±0.6 帧）。两个都对才算取对 —— 只核对其一，索引和内容一起偏的情况会漏过去。
+2. **时间轴只认 `video_source`。** 拿真实的 10 段官方片段断言
+   `-2cNMO9Mm3Q_192.4_209.2` 的起点是 **195.790**（目录名差 −3.39 s ≈ 102 源帧），
+   哪天有人"顺手"改成读目录名，这条会红。
+3. **截断的素材必须被判死。** 造一个 `+movflags faststart` 之后掐掉后 2/3 字节的文件
+   —— 这和 YouTube 不给 PO Token 时返回的残件**是同一种形状**：`ffprobe` 报得出完整
+   时长，解码 0 帧。测试先断言"它确实还能 probe"，再断言 `verify_playable` 报"截断"。
+   **验收必须真解码**，只信 ffprobe 会被骗。
+
+对齐判据自己也要被验：同内容 → `lag == 0` / `verdict == aligned`；把 `depth.mp4`
+掐掉前 5 帧 → `verdict != aligned`。判据分不清对齐和错位，拿它验收就是自欺。
+
+跑真实数据时的验收线（`align_report.json` / `frames_index.json`）：
+
+| 字段 | 该是什么 |
+|---|---|
+| `sampling.within_half_frame` | `true`（`max|dt| ≤ 0.5/fps_src`，30 fps 源 = 16.7 ms） |
+| `counts` 里所有 `*_decoded` | 全部等于 `scene.json` 的 `stats.n_frames` |
+| `motion_lag["depth.mp4"].best_lag` | `0` |
+| `verdict` | `aligned`（缺判据只会写 `unknown`，**不会写 pass**） |
+| `align_montage.png` | **用眼睛看**：手部关节点要落在画面里手的位置上 |
+
+**这一档不适用逐字节基线**：`rgb.mp4` 的字节取决于源视频文件本身（不同 client / 不同
+清晰度下载到的不是同一份），基线会绑死在一次下载上。确定性的部分（时间轴、取帧索引）
+已经由上面的合成素材测试钉住，那才是我们自己的逻辑。
+
+「没破坏现有行为」这条另外给凭据：这一档**全是新文件**，所以直接用 md5 证明 —— 把
+`git ls-files` 里所有 `.py` / `.sh` / `.yaml` / `.xml`（139 个）逐个与 `HEAD` 比，
+不同的 0 个（改动只有 4 份 `.md` 加新增文件）。这比"单测全绿所以没破坏"实在。
+
+```bash
+while IFS= read -r f; do case "$f" in *.py|*.sh|*.yaml|*.xml)
+  a=$(git show "HEAD:$f" | md5sum | cut -d' ' -f1); b=$(md5sum "$f" | cut -d' ' -f1)
+  [ "$a" = "$b" ] || echo "CHANGED: $f";; esac; done < <(git ls-files)
+```
 
 ---
 

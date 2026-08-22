@@ -18,6 +18,7 @@
 | 论文要引的实验数字 | `evidence/` —— **只有这里的产物进 git** |
 | 跑出来的视频 / npz / clip | `outputs/`，按"谁写的"分子目录（见 §4） |
 | 原始视频素材 | `data/` |
+| 官方片段对应的原片画面 | `scripts/s0_fetch_rgb.sh`（`src/web2robot/fetch/`）—— 起止时刻**只认 `scene.json` 的 `video_source`**，目录名里的秒数实测不可信 |
 | 机器人 MJCF / mesh | `assets/robots/<机器人名>/`（`m7`、`l3_4`） |
 | 机器人参数（关节限位 / 静息姿态 / 碰撞盒与门槛） | `configs/robots/<机器人名>.yaml` —— **一台机器人一个文件，代码里不留第二份**；每组带 `verified` 说明是不是实测标定的 |
 | 想跳过质检/路由（公司自己有一套） | `--quality_gate skip` / `--routing skip`，取值集合只写在 `src/web2robot/quality/config.py` 的 `GATE_MODES` / `ROUTING_MODES`；默认 `builtin` = 行为不变 |
@@ -36,6 +37,11 @@ web2robot/
 ├── src/web2robot/            ← 全部逻辑。一个流水线环节一个包
 │   ├── paths.py                 路径解析总入口（P.weights() / P.check_output_dir()）
 │   ├── common/                  跨环节共用（video_io：解码抽帧）
+│   ├── fetch/       ══════ ⓿取原始画面   官方片段元数据 → 源视频 → 逐帧对应的 RGB
+│   │                            官方发布里一帧真 RGB 都没有（depth.mp4 是深度），
+│   │                            而"抠人换机器人"必须要 RGB，所以补了这一档；
+│   │                            时间轴只认 scene.json 的 video_source（目录名不可信，
+│   │                            实测有一段差 3.39 s = 102 源帧）。`--dry_run` 不碰网络
 │   ├── quality/     ══════ ①取景质检     拍全了没 / 稳不稳 / 背景合不合适
 │   │                            `python -m web2robot.quality --quality_gate skip` 整档跳过
 │   │                            （2026-08-21：公司已有质检体系，这一档降级为可选）
@@ -72,13 +78,14 @@ web2robot/
 │   └── eval/                    评测代码（给 evidence/ 算表用，纯 numpy、秒级）
 │
 ├── scripts/                 ← 薄壳：只负责"用对的解释器 + 设好 PYTHONPATH"，不含逻辑
+│   ├── s0_fetch_rgb.sh          ⓿（片段名以 `-` 开头，--clip 要写成 `--clip=-xxx_1.0_2.0`）
 │   ├── s1_quality_gate.sh       ①
 │   ├── s3_to_clip.sh            ③（子命令 hawor / wilor，各自的 venv）
 │   ├── s4_retarget.sh           ④＋⑤（调上游主流程，碰撞/清洗走我方包）
 │   └── dev/                     开发期工具：check_* 回归比对、render_*/viz_* 出片、
 │                                 build_l3_4_assets.py（从厂家原包生成 L3.4 资产）
 │
-├── tests/                   ← stdlib unittest，秒级，365/365
+├── tests/                   ← stdlib unittest，秒级，392/392
 │   └── regression/              回归基准片段 + 期望判决（qc.jsonl / contact_sheet.png）
 │
 ├── configs/
@@ -105,6 +112,8 @@ web2robot/
 │   └── webvid/raw/              手工挑的 7 段原片 + MANIFEST.md5（重抓不回来）
 │
 ├── outputs/                 ← 全部产物，不进 git。**产物只许落这里**（见 §4）
+│   ├── fetch/                   ⓿的产物：<片段>/rgb.mp4 + frames_index.json +
+│   │                            align_report.json；`_sources/` 是源视频缓存（同一支只下一次）
 │   ├── clips/                   ③的产物：EgoInfinity clip 目录
 │   ├── retarget/                ④⑤的产物：trajectory.npz / robot_sim.mp4 / input_viz.mp4
 │   ├── twin/                    物体位姿单跑的产物：object_poses.npz / .json / object_viz.mp4

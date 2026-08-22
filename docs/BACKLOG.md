@@ -110,6 +110,10 @@
 > 也不是要把格式做到跟公司标准完全吻合；唯一要做的是把**"原始视频 → 视觉合成 →
 > 产出带画面的数据"这条链路，在 M7 一台机器人、少量官方示例视频上完整跑通**。
 > 格式细节允许临时占位，**不要因为格式不确定就卡住不推进**。
+>
+> **2026-08-23 追加 B12（新的待决项，队列又不空了）**：按 B3 定的路线去下载原始视频，
+> 撞上 YouTube 的 PO Token 门槛 —— 四个可选方案里有两个涉及新依赖/账号，不是我该自己
+> 决定的，明细见下表和 §B12。
 
 | # | 当时撞到什么 | 用户 2026-08-22 定的 | 落到哪 / 还欠什么 |
 |---|---|---|---|
@@ -122,6 +126,44 @@
 | B9 | fps 不只是"不是 30"，是逐段都不一样（15.0000 / 15.0468 / … / **18.4041**） | **方案③**：`info.json` 写一个名义 fps，每段真实 fps 进 episodes parquet 的自定义列（先例是参考自己的 `dense_subtask_*`）。**不做重采样、不按 fps 分 shard** | [`LEROBOT_ALIGNMENT_GAP.md`](LEROBOT_ALIGNMENT_GAP.md) §6 |
 | B10 | 三个 env 都没装 `pyarrow`，而规矩是"共享机器不要 pip install" | **批准安装**，加进 `envs/requirements-rt.txt`，并**破例授权我自己执行这次安装** | **已做完**：`pyarrow==25.0.1` 装入 `rt_env`（`pip install --no-deps`，freeze 前后 diff 只多这一行，numpy 仍 2.2.6），requirements 已加，365 个测试全绿；`external/patches/_pre_migration_snapshot/README.md` 那条 8/06 的 md5 加了脚注（`e8f9e2f7…` → `841a67ed…`，历史存档值不改） |
 | B11 | 我们产的 mp4 是 mpeg4，参考要 h264，还违反我方约定 §3；换编码器会让 `robot_sim.mp4 = 205d96db…` 这条基线失效 | **现在不改**：只有真正要打包发布的数据才用 `libx264` 转 h264；现有调试产物（`robot_sim.mp4` 等）保持 mpeg4 原样，`docs/VERIFICATION.md` 里已建立的验收基准一条都不动 | 转码放在导出模块自己做；上游 `retarget/utils/viz.py::write_video` 不碰 |
+| B12 | **按 B3 走下载这条路，字节拿不到**：不带 GVS PO Token，11 个 yt-dlp client 全失败（403 / "format not available" / 同一个 145471 字节的残件：容器声称 278 s、8331 帧，实际解码 0 帧） | **待拍板**（2026-08-23 提出） | 见下方 §B12：四个方案，两个需要你点头。截取+对齐验收那一半已经写完并用合成素材测通，`--backend local` 一开、字节一到位就能跑 |
+
+### B12. 原始视频下载被 PO Token 卡住（2026-08-23，待拍板）
+
+B3 定的路线（YouTube ID + 起止秒数 → 下载原片 → 截取）里，**截取和验收这一半已经做完**
+（`src/web2robot/fetch/`，27 个测试，逐帧核对内容），卡住的只有"拿到源视频字节"这一步。
+
+实测（11 个 client 全试过）：
+
+| client | 结果 |
+|---|---|
+| `android_vr`、`tv_embedded` | `HTTP Error 403: Forbidden` |
+| `web`、`web_safari`、`ios`、`mweb` | "Requested format is not available"，或返回**同一个 145471 字节的残件** |
+| `web_creator` | "Please sign in" |
+| `tv` | "The page needs to be reloaded" |
+
+那个残件的形状值得记住：`ffprobe` 报 278 s / 8331 帧（**元数据完整**），实际
+`ffmpeg -ss 1 -frames:v 1` 报 `partial file`、解出 0 帧。所以**验收必须真解码**，
+只看 ffprobe 会被骗过去（这条已经写成测试钉住了）。
+
+试过但不解决的：装 `node v22` 当 JS runtime（`--js-runtimes node`）、
+`--remote-components ejs:github`。根因是缺 GVS PO Token，不是格式表达式、不是 JS runtime。
+
+四个方案：
+
+| 方案 | 代价 / 需要你点头的地方 |
+|---|---|
+| ① 装 node 版 PO-token provider（bgutil） | npm registry 通（200），技术上可行。但这是**新的依赖类别** —— 运行时执行 Google 的 BotGuard JS，而且要往共享机器装 node 包。**要你批准** |
+| ② 提供登录账号的 cookies | 要你给一份 cookies；且账号可能被风控 |
+| ③ 从别处拿源视频（公司镜像/别的机器已下好的） | 本模块**已经支持**：`--backend local --source_dir …`，零改动 |
+| ④ 不要真 RGB，继续往下做 | 视觉合成没有输入，等于放弃 B4 定的"发布数据必须带画面" |
+
+**我的建议是 ③ → ①**：③ 零新依赖零风险，只要那 6 支视频在公司内网哪台机器上存在；
+③ 不通再考虑 ①。**在你拍板前我不会装任何东西、不会引入 cookies。**
+
+（顺带一条实测事实，与下载无关但影响正确性：片段**目录名里的秒数不可信** ——
+`-2cNMO9Mm3Q_192.4_209.2` 的真实起点是 195.790，按目录名截会整段错开约 102 个源帧。
+代码里只认 `scene.json` 的 `video_source`，目录名仅用于交叉核对。）
 
 ## C. 有意推后的欠账
 
@@ -174,6 +216,12 @@
   拿到之后：丢到 `assets/robots/urdf.tar.gz`，`--force` 重建，产物应当和现在的逐字节相同
   （脚本七步自检会自己核对），顺手把它提交进去，下次就不会再丢。
 - 请人 `chown fanshaoheng` memory 目录里那 6 个 root 所有的文件（现在改不动）。
+- **GitLab 还欠一次 push**（2026-08-22）：`48046e9` 及之前的 14 个提交已经推到
+  `github`/`github2` 两个 remote 的 `main`，但 `origin`（`gitlab.robotera.com`）
+  服务端在报 `Internal API unreachable`（GitLab Shell 连不上自己的内部 API，
+  https 也是 SSL EOF）—— **不是权限问题也不是本地问题**，重试三次都一样。
+  等它恢复后补一条：`git push origin main:web2robot`
+  （**落点是 `web2robot` 分支，不是 `main`**，本地 `main` 跟踪的就是 `origin/web2robot`）。
 
 ---
 

@@ -65,11 +65,19 @@ M7 人形机器人）的关节角轨迹 —— 可以直接当模仿学习的训
 
 | 环节 | 输入 → 输出 | 用什么技术 | 代码 |
 |---|---|---|---|
+| ⓿取原始画面 | 官方片段元数据 → `rgb.mp4` + 对齐报告 | 按 `video_source` 的 YouTube ID + 起止秒数逐帧对应截取；三条判据量对齐 | [`fetch/`](src/web2robot/fetch/) |
 | ①质检 | 原始 mp4 → 判决 + 标签 | KeypointRCNN 人体姿态、YOLO 手部检测、光流、切镜检测 | [`quality/`](src/web2robot/quality/) |
 | ②路由 | 标签 → 走哪条路线 | 规则（来自一个月的人工试错） | [`routing/`](src/web2robot/routing/) |
 | ③感知 | mp4 → 手的 3D 轨迹 | HaWoR（SLAM+MANO）或 WiLoR+MoGe | [`perception/`](src/web2robot/perception/) |
 | ④重定向 | 手轨迹 → 关节角 | 根位姿两条路线（flow-matching 生成 / 网格搜索）+ 逆运动学 | [`retarget/`](src/web2robot/retarget/) |
 | ⑤碰撞/轨迹 | 关节角 → 干净的关节角 | 代理几何 + 有符号距离梯度下降；坏帧检测与填补 | [`collision/`](src/web2robot/collision/) [`trajectory/`](src/web2robot/trajectory/) |
+
+⓿ 是**官方片段那条支路**上补的一档，不在上面这张图的主干上：官方发布的片段里深度、
+掩码、手部关节都有，**唯独一帧 RGB 画面都没有**（`depth.mp4` 是深度，`thumb.jpg` 是深度
+的伪彩缩略图），而"抠掉人、贴上机器人"必须要 RGB。所以按片段元数据里的 `video_source`
+把原片对应的那一段还原出来 —— 逐帧算时刻、最近邻取帧，并且把每一帧的时间误差写进
+`frames_index.json` 自证。**目录名里的秒数不可信**（实测有一段差 3.39 s ≈ 102 源帧），
+只认 `scene.json`。细节见 [`src/web2robot/fetch/README.md`](src/web2robot/fetch/README.md)。
 
 ①②**不是强制的**：公司内部已经有现成的质检评估体系，2026-08-21 起这两步降级为
 可选 —— `--quality_gate skip` / `--routing skip` 整档跳过（默认 `builtin` 行为不变，
@@ -280,12 +288,16 @@ outputs/retarget/xxx/
 ### 先跑测试确认环境是好的（秒级，不需要 GPU）
 
 ```bash
-envs/rt_env/bin/python -m unittest discover -s tests -v     # 288 个用例，约 24 秒
+envs/rt_env/bin/python -m unittest discover -s tests -v     # 392 个用例，约 30 秒
 ```
 
 ### 跑一遍流水线
 
 ```bash
+# ⓿ 取原始画面：官方片段元数据 → 源视频 → 逐帧对应的 rgb.mp4 + 对齐验收
+#    先加 --dry_run 看一眼计划（不碰网络）；视频已在手上就用 --backend local --source_dir
+scripts/s0_fetch_rgb.sh data/clips_official --out outputs/fetch --dry_run
+
 # ① 质检：一个目录的视频 → 判决 + 路由标签，另出 contact sheet 给人看
 scripts/s1_quality_gate.sh data/videos/ --out outputs/qc.jsonl --viz outputs/ev/
 
