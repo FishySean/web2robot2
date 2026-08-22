@@ -98,7 +98,56 @@
 
 ---
 
-## 4. 补背景（inpaint）怎么做
+## 3.6 按片段那台相机把机器人渲出来（第二块，已做完）
+
+`src/web2robot/synth/render.py` + `scripts/s6_robot_render.sh`。合成要把渲好的机器人
+**贴回原画面**，所以渲出来的这一台必须和画面共用同一台相机 —— 内参、外参、逐帧位姿
+三样都得对上，差一样就是"贴上去但对不齐"。
+
+```bash
+scripts/s6_robot_render.sh data/clips_official \
+    --runs_dir outputs/retarget/collcmp --pattern '*_grid' --out outputs/synth/render --npz
+```
+
+产物逐段三样：`robot_render_check.png`（九宫格核对图）、`robot_render.mp4`（h264）、
+`robot_render.npz`（`depth_mm` uint16 + 按位打包的 `mask`，给合成用）。
+
+**为什么不能用上游那份渲染**：上游 `test.py::render_robot_sim` 用的是自由视角相机、
+只出彩色、分辨率写死 1080×1440。它是给人看轨迹对不对的，不是给合成用的。
+
+**三件要对上的事，各自怎么解**：
+
+| 要对上什么 | 怎么解 |
+|---|---|
+| 内参 | `fovy = 2·atan(H/2f)`，往内存里那份模型 `add_camera` 加一台。**前提是主点居中** —— 10 段官方片段实测 `cx == W/2`、`cy == H/2` 逐位精确成立，所以不用改投影矩阵；不成立的片段直接 `CameraNotSupported` 报错，不做近似 |
+| 外参 | `root_frames.npz` 的 `R_per_frame`/`t_per_frame` 是**根 link（`waist_pitch_link`）在片段相机系里**的位姿（依据：上游 `test.py:518` 拿它当 `draw_frame` 的 `root` 画在画面上）。反解相机在 MuJoCo 世界系里的位姿，再乘 `diag(1,-1,-1)` 换 OpenCV→MuJoCo 的轴向 |
+| 逐帧位姿 | `trajectory.npz` 的双臂 + 双手关节角，逐帧 `mj_forward` |
+
+**踩到的两个坑（都写进了模块 docstring）**：
+
+1. **场景 XML 不能用 `scene_vis.xml`** —— 它带一块无限大地板，从片段相机的视角看过去
+   直接糊满整幅画面。要用 robot-only 的 `m7.xml`。
+2. **写完 `model.cam_pos` 必须自己补一次 `mj_camlight`** —— `mjv_updateScene` 读的是
+   `data.cam_xpos`，而写 `model` 不会更新 `data`。不补的后果是**静默的**：第 0 帧从世界
+   原点拍（66% 的像素落在 2.6–4.4 cm），之后每一帧都用上一帧的相机。静态根位姿的 grid
+   片段上肉眼看不出来，neural 片段上全程错。`tests/test_synth_render.py` 里有一个
+   顺序无关性回归测试钉住这条，删掉 `mj_camlight` 会红 3 个。
+
+**判据：把"错位"拆成两段，各自报中位**（因为 B13 已经证明官方 3D 手和官方 2D 关节
+自己就对不上，混在一起报会把别人的账记到我们头上）：
+
+- `robot_mano_px` = 机器人手腕投影 ↔ 官方 3D 手腕投影 —— **这一段才是我方链路的账**
+- `mano_2d_px` = 官方 3D 手腕投影 ↔ 官方 `hand_joints_2d.bin` —— 官方数据自相矛盾（B13）
+- `robot_2d_px` = 两者叠加，也就是画面上实际看到的错位
+
+8 段 × 2 只手实测（`outputs/synth/render/render.jsonl`）：`robot_mano_px` 中位
+**1.72 px**，16 只手里 11 只 < 2 px。剩下 5 只的成因**逐只归因过**，见
+`docs/VERIFICATION.md` ⑦ 那节的表 —— 两只是 IK 没解出来（源头坏帧），两只是碰撞过滤
+把手推走了（BACKLOG **B15**），一只是 IK 有个别尖峰帧。
+
+**还是只有一半独立性**：这一段量的是"手腕落点"，不是"整台机器人贴得对不对"。真正的
+复验要等真 RGB（B12）—— 现在核对图的底图还是深度。
+
 
 低成本路线，两条都不需要新依赖：
 
@@ -115,6 +164,7 @@
 | | 依赖 B12 吗 | 现在能做 |
 |---|---|---|
 | 手部掩码光栅化（MANO → 掩码） | 不依赖 | ✅ **已做完**，见 §3.5 |
+| 按片段相机渲机器人（彩色+深度+掩码） | 不依赖 | ✅ **已做完**，见 §3.6 |
 | 深度排序合成的核心逻辑 | 不依赖 | ✅ 能做，用合成 RGB 测；真画面到位再复验 |
 | 人体掩码（Mask R-CNN） | **依赖** | ❌ 没有 RGB 就没有输入 |
 | 补背景 | **依赖** | ❌ 同上 |

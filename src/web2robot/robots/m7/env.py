@@ -103,9 +103,19 @@ class M7Env:
         self,
         mjcf_path: Optional[Path] = None,
         start_config: Optional[dict] = None,
+        model: Optional["mujoco.MjModel"] = None,
     ):
-        mjcf_path = Path(mjcf_path) if mjcf_path is not None else _SCENE_PATH
-        self.model = mujoco.MjModel.from_xml_path(str(mjcf_path))
+        # ``model=`` 是给"模型需要在内存里改过再用"的调用方留的入口：
+        # ``synth/render.py`` 要往模型里加一台按片段内参配好的 <camera>、并把离屏缓冲
+        # 顶到画面尺寸，这两件事只能在 compile 期做（MjSpec），**不能改磁盘上的资产**。
+        # 给了 model 就直接用它，mjcf_path 被忽略。
+        if model is not None:
+            if mjcf_path is not None:
+                raise ValueError("mjcf_path 和 model 只能给一个")
+            self.model = model
+        else:
+            mjcf_path = Path(mjcf_path) if mjcf_path is not None else _SCENE_PATH
+            self.model = mujoco.MjModel.from_xml_path(str(mjcf_path))
         self.data  = mujoco.MjData(self.model)
 
         self._start_config = start_config

@@ -71,7 +71,7 @@ M7 人形机器人）的关节角轨迹 —— 可以直接当模仿学习的训
 | ③感知 | mp4 → 手的 3D 轨迹 | HaWoR（SLAM+MANO）或 WiLoR+MoGe | [`perception/`](src/web2robot/perception/) |
 | ④重定向 | 手轨迹 → 关节角 | 根位姿两条路线（flow-matching 生成 / 网格搜索）+ 逆运动学 | [`retarget/`](src/web2robot/retarget/) |
 | ⑤碰撞/轨迹 | 关节角 → 干净的关节角 | 代理几何 + 有符号距离梯度下降；坏帧检测与填补 | [`collision/`](src/web2robot/collision/) [`trajectory/`](src/web2robot/trajectory/) |
-| ⑥视觉合成 | 画面 + 关节角 → 人换成机器人的画面 | 手部掩码（MANO 网格逐帧对齐后光栅化）→ 补背景 → 按深度合成 | [`synth/`](src/web2robot/synth/) |
+| ⑥视觉合成 | 画面 + 关节角 → 人换成机器人的画面 | 手部掩码（MANO 网格逐帧对齐后光栅化）→ **按片段相机渲机器人**（彩色+深度+掩码）→ 补背景 → 按深度合成 | [`synth/`](src/web2robot/synth/) |
 
 ⓿ 是**官方片段那条支路**上补的一档，不在上面这张图的主干上：官方发布的片段里深度、
 掩码、手部关节都有，**唯独一帧 RGB 画面都没有**（`depth.mp4` 是深度，`thumb.jpg` 是深度
@@ -296,7 +296,7 @@ outputs/retarget/xxx/
 ### 先跑测试确认环境是好的（秒级，不需要 GPU）
 
 ```bash
-envs/rt_env/bin/python -m unittest discover -s tests -v     # 427 个用例，约 30 秒
+envs/rt_env/bin/python -m unittest discover -s tests -v     # 448 个用例，约 70 秒
 ```
 
 ### 跑一遍流水线
@@ -321,6 +321,10 @@ scripts/s4_retarget.sh examples/fill_jar --robot m7 --out outputs/retarget/fill_
 
 # ⑥ 手部掩码 + 一张能用眼睛看的核对图（底是深度，真 RGB 还没到位）
 scripts/s5_hand_mask.sh data/clips_official --out outputs/synth
+
+# ⑥ 按片段那台相机把机器人渲出来（彩色 + 深度 + 掩码，给合成用）
+scripts/s6_robot_render.sh data/clips_official \
+    --runs_dir outputs/retarget/collcmp --pattern '*_grid' --out outputs/synth/render --npz
 ```
 
 跑完**一定要打开 `robot_sim.mp4` 看一眼**。这个工程有一条贯穿全流程的规矩：

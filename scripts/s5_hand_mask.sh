@@ -12,5 +12,7 @@
 # 所以 --clip 传值时用 `--clip=--oo8_XIuOM_799.5_809.8` 这种写法。
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# `mask` 是子命令名（同一个 -m 入口下还有 render，见 scripts/s6_robot_render.sh）——
+# 这个薄壳只管手部掩码，所以在这里写死，命令行用法一个字没变。
 exec env PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
-     "$ROOT/envs/rt_env/bin/python" -m web2robot.synth "$@"
+     "$ROOT/envs/rt_env/bin/python" -m web2robot.synth mask "$@"
