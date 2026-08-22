@@ -71,6 +71,7 @@ M7 人形机器人）的关节角轨迹 —— 可以直接当模仿学习的训
 | ③感知 | mp4 → 手的 3D 轨迹 | HaWoR（SLAM+MANO）或 WiLoR+MoGe | [`perception/`](src/web2robot/perception/) |
 | ④重定向 | 手轨迹 → 关节角 | 根位姿两条路线（flow-matching 生成 / 网格搜索）+ 逆运动学 | [`retarget/`](src/web2robot/retarget/) |
 | ⑤碰撞/轨迹 | 关节角 → 干净的关节角 | 代理几何 + 有符号距离梯度下降；坏帧检测与填补 | [`collision/`](src/web2robot/collision/) [`trajectory/`](src/web2robot/trajectory/) |
+| ⑥视觉合成 | 画面 + 关节角 → 人换成机器人的画面 | 手部掩码（MANO 网格逐帧对齐后光栅化）→ 补背景 → 按深度合成 | [`synth/`](src/web2robot/synth/) |
 
 ⓿ 是**官方片段那条支路**上补的一档，不在上面这张图的主干上：官方发布的片段里深度、
 掩码、手部关节都有，**唯独一帧 RGB 画面都没有**（`depth.mp4` 是深度，`thumb.jpg` 是深度
@@ -78,6 +79,13 @@ M7 人形机器人）的关节角轨迹 —— 可以直接当模仿学习的训
 把原片对应的那一段还原出来 —— 逐帧算时刻、最近邻取帧，并且把每一帧的时间误差写进
 `frames_index.json` 自证。**目录名里的秒数不可信**（实测有一段差 3.39 s ≈ 102 源帧），
 只认 `scene.json`。细节见 [`src/web2robot/fetch/README.md`](src/web2robot/fetch/README.md)。
+
+⑥ 才刚开第一块（手部掩码）。素材清单和还缺什么见
+[`docs/VISUAL_SYNTH_INPUTS.md`](docs/VISUAL_SYNTH_INPUTS.md) —— 简单说：深度、物体掩码、
+接触信号、MANO 手部网格官方都给了，**没有的是人体/手臂掩码和 RGB 本身**。
+掩码这一块有个实测发现值得记住：官方 3D 手直接投影**对不上画面**（和官方
+`hand_joints_2d.bin` 差 9.3 px 中位，逐帧解出来的缩放在 0.32–0.95 漂），所以必须
+逐帧逐手拟合一个缩放+平移再光栅化（残差降到 3.7 px，非指尖关节落点 76.5% → 96.4%）。
 
 ①②**不是强制的**：公司内部已经有现成的质检评估体系，2026-08-21 起这两步降级为
 可选 —— `--quality_gate skip` / `--routing skip` 整档跳过（默认 `builtin` 行为不变，
@@ -288,7 +296,7 @@ outputs/retarget/xxx/
 ### 先跑测试确认环境是好的（秒级，不需要 GPU）
 
 ```bash
-envs/rt_env/bin/python -m unittest discover -s tests -v     # 392 个用例，约 30 秒
+envs/rt_env/bin/python -m unittest discover -s tests -v     # 427 个用例，约 30 秒
 ```
 
 ### 跑一遍流水线
@@ -310,6 +318,9 @@ scripts/s3_to_clip.sh hawor external/HaWoR/example/ho3d_SMu41 --frames 55 \
 scripts/s4_retarget.sh examples/fill_jar --robot m7 --out outputs/retarget/fill_jar \
     --ckpt runs/m7/taskspace_v2/checkpoints/final.pt --seed 0 --n_samples 5 \
     --arm_torso_collision --dual_hand_collision
+
+# ⑥ 手部掩码 + 一张能用眼睛看的核对图（底是深度，真 RGB 还没到位）
+scripts/s5_hand_mask.sh data/clips_official --out outputs/synth
 ```
 
 跑完**一定要打开 `robot_sim.mp4` 看一眼**。这个工程有一条贯穿全流程的规矩：

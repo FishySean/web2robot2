@@ -9,7 +9,7 @@
 **所有模块共通的最后一步：出片，用眼睛看。** 指标 ≠ 画面。
 
 ```bash
-envs/rt_env/bin/python -m unittest discover -s tests -v     # 秒级，全套 392 个用例
+envs/rt_env/bin/python -m unittest discover -s tests -v     # 秒级，全套 427 个用例
 ```
 
 ---
@@ -24,6 +24,7 @@ envs/rt_env/bin/python -m unittest discover -s tests -v     # 秒级，全套 39
 | ③感知前端 | 单测（注入假 callable）+ 冻结值比对 | 前端要 GPU，但算术部分可以纯 numpy 测 |
 | ④重定向 | 隔离对比逐位一致 + 固定 seed 的端到端 | 根锚点有随机源，不固定 seed 无法比 |
 | ⑤碰撞 / 轨迹 | **逐位相同** | 纯 CPU 有限差分，没有随机源 |
+| ⑥手部掩码 | 官方 2D 关节落在掩码里的比例，**指尖/非指尖分开报** + 核对图用眼睛看 | 指尖骨节点本来就在网格外，混着算会把"几何本来如此"当成"掩码错位" |
 | M7 机器人定义 | 两个验收脚本输出逐字节一致 | 资产是静态的，任何变化都该是有意的 |
 | 新加一台机器人 | 生成脚本七步自检 + **表 vs 自己的 MJCF** + 老机器人逐字节不变 | 两台同构机器人之间不许互当真源，见下 |
 | `evidence/` 里的数 | 断言**具体数值**，不是大于小于 | 防的是论文数字和证据脱钩 |
@@ -237,6 +238,44 @@ scripts/dev/m7_tool.sh compare_root_pose_solvers.py \
 
 第 3 条也是这条路线上"指标 ≠ 画面"的具体形态：`keyframe_ik_rate` 100% 完全可能
 配一个不能用的解，所以对比表里 `kf / 全部帧 / 同分` 三个数要一起看，最后还是要出片。
+
+## ⑥视觉合成 · 手部掩码（`src/web2robot/synth/`，2026-08-23）
+
+这一档没有"逐位相同"可比（全是新代码），也**暂时没有真 RGB 可看**（BACKLOG B12）。
+所以判据分两层：合成素材上的确定性测试，加真实素材上的量化落点。
+
+```bash
+envs/rt_env/bin/python -m unittest tests.test_synth_handmask -v   # 35 个用例，约 5 秒
+scripts/s5_hand_mask.sh data/clips_official --out outputs/synth   # 10 段，约 2 分钟
+```
+
+**合成素材测的是"对齐这一步真的在起作用"**：造一段片段，让 2D 关节 = 3D 投影结果做一个
+已知的 (s, tx, ty) 变换，`frame_alignments()` 必须把那三个数解回来（残差 < 0.01 px），
+且对齐后的掩码把 2D 关节全包住（1.000）、不对齐的一个都包不住（0.000）。这一条如果
+只在真实数据上看比例，"从 0.765 涨到 0.964"说不清是对齐对了还是碰巧。
+
+**真实素材的验收线**（`outputs/synth/handmask.jsonl`，10 段官方片段）：
+
+| 字段 | 该是什么 | 实测 |
+|---|---|---|
+| `joints_inside.non_tip.fraction` | > 0.9（判"掩码有没有错位"看这个） | 合并 **0.964**，最差一段 0.847 |
+| `joints_inside.tip.fraction` | 明显低于 non_tip（几何本来如此，不是缺陷） | 合并 0.789 |
+| 同上，`--no_align` 对照 | 必须明显更差，否则说明对齐是多余的 | non_tip 0.765 / tip 0.457 |
+| `alignment.residual_px.median` | < 5 px | 1.08–7.04（最差那段见 BACKLOG B13） |
+| `alignment.scale.min/max` | **不该恒等于 1** —— 恒 1 说明这一步是多余的 | 0.088–1.806 |
+| `masks.empty_frames` | `0`（有手的帧不该没掩码） | 全部 0 |
+| `handmask_check.png` | **用眼睛看**：掩码贴在手上、绿色关节点落在染色区里 | 10 段逐段看过 |
+
+**为什么核对图的底是深度**：`depth.npz` 是这条链路上目前唯一一份真实成像，手在深度图里
+轮廓清楚，掩码贴不贴边一眼能看出来。RGB 到位之后把底图换掉，判据不用改。
+
+**这条判据只有一半独立性，要写明白**：对齐用的就是 `hand_joints_2d.bin`，所以落点比例
+证的是"网格形状 + 那个变换能包住关节"，证不了 3D→2D 那一步。完整的复验要等真 RGB。
+
+「没破坏现有行为」同样用 md5 证：`git ls-files` 里 149 个 `.py`/`.sh`/`.yaml`/`.xml`
+逐个与 `HEAD` 比，不同的 **0 个**（改动只有 3 份 `.md` 加新增文件）。命令见上面 ⓿ 那节。
+
+---
 
 ## ⑤碰撞检测 / 轨迹清洗（`src/web2robot/collision/`、`trajectory/`）
 

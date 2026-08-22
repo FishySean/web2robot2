@@ -19,6 +19,7 @@
 | 跑出来的视频 / npz / clip | `outputs/`，按"谁写的"分子目录（见 §4） |
 | 原始视频素材 | `data/` |
 | 官方片段对应的原片画面 | `scripts/s0_fetch_rgb.sh`（`src/web2robot/fetch/`）—— 起止时刻**只认 `scene.json` 的 `video_source`**，目录名里的秒数实测不可信 |
+| 画面里的人手在哪（掩码） | `scripts/s5_hand_mask.sh`（`src/web2robot/synth/`）—— 官方 MANO 网格投影后**必须逐帧对齐**才和画面对得上，素材清单见 [`VISUAL_SYNTH_INPUTS.md`](VISUAL_SYNTH_INPUTS.md) |
 | 机器人 MJCF / mesh | `assets/robots/<机器人名>/`（`m7`、`l3_4`） |
 | 机器人参数（关节限位 / 静息姿态 / 碰撞盒与门槛） | `configs/robots/<机器人名>.yaml` —— **一台机器人一个文件，代码里不留第二份**；每组带 `verified` 说明是不是实测标定的 |
 | 想跳过质检/路由（公司自己有一套） | `--quality_gate skip` / `--routing skip`，取值集合只写在 `src/web2robot/quality/config.py` 的 `GATE_MODES` / `ROUTING_MODES`；默认 `builtin` = 行为不变 |
@@ -75,6 +76,12 @@ web2robot/
 │   │   └── tiers.py             EgoSmith 的另外两个粒度（整段/轨迹段），
 │   │                            `test.py --bad_frame_tiers` 切换，默认只有 frame；
 │   │                            **只警告/只标记，一个数都不改**
+│   ├── synth/       ══════ ⑥视觉合成      抠掉画面里的人、贴上渲染的机器人（任务B）
+│   │                            现在只有第一块：MANO 网格 → 手部掩码。**只投影是对不上
+│   │                            画面的** —— 官方 3D 手的尺度逐帧在漂（实测 0.32–0.95），
+│   │                            所以先用 hand_joints_2d.bin 逐帧逐手拟合 s+t 再光栅化
+│   │                            （裸投影差 9.3 px 中位 → 对齐后 3.7 px）。
+│   │                            核对图的底是深度 —— 真 RGB 还卡在 BACKLOG B12
 │   └── eval/                    评测代码（给 evidence/ 算表用，纯 numpy、秒级）
 │
 ├── scripts/                 ← 薄壳：只负责"用对的解释器 + 设好 PYTHONPATH"，不含逻辑
@@ -82,10 +89,11 @@ web2robot/
 │   ├── s1_quality_gate.sh       ①
 │   ├── s3_to_clip.sh            ③（子命令 hawor / wilor，各自的 venv）
 │   ├── s4_retarget.sh           ④＋⑤（调上游主流程，碰撞/清洗走我方包）
+│   ├── s5_hand_mask.sh          ⑥（`--no_align` 是对照开关，不是省事开关）
 │   └── dev/                     开发期工具：check_* 回归比对、render_*/viz_* 出片、
 │                                 build_l3_4_assets.py（从厂家原包生成 L3.4 资产）
 │
-├── tests/                   ← stdlib unittest，秒级，392/392
+├── tests/                   ← stdlib unittest，秒级，427/427
 │   └── regression/              回归基准片段 + 期望判决（qc.jsonl / contact_sheet.png）
 │
 ├── configs/
@@ -114,6 +122,8 @@ web2robot/
 ├── outputs/                 ← 全部产物，不进 git。**产物只许落这里**（见 §4）
 │   ├── fetch/                   ⓿的产物：<片段>/rgb.mp4 + frames_index.json +
 │   │                            align_report.json；`_sources/` 是源视频缓存（同一支只下一次）
+│   ├── synth/                   ⑥的产物：<片段>/handmask_check.png（深度底的核对图）+
+│   │                            hand_masks.npz（左右手按位打包）+ handmask.jsonl（逐段判据）
 │   ├── clips/                   ③的产物：EgoInfinity clip 目录
 │   ├── retarget/                ④⑤的产物：trajectory.npz / robot_sim.mp4 / input_viz.mp4
 │   ├── twin/                    物体位姿单跑的产物：object_poses.npz / .json / object_viz.mp4
@@ -262,6 +272,7 @@ web2robot/
 
 | 写入口 | 落点 |
 |---|---|
+| `scripts/s0_fetch_rgb.sh` | `outputs/fetch/<片段名>/`（`rgb.mp4` + `frames_index.json` + `align_report.json`）+ `outputs/fetch/_sources/` 源视频缓存（同一支视频只下一次，别手删） |
 | `scripts/s3_to_clip.sh` | `outputs/clips/<片段名>/`（3~4 个 clip 契约文件） |
 | `scripts/s4_retarget.sh` | `outputs/retarget/<片段名>/`（顶掉上游"写在素材旁边"的默认值） |
 | `scripts/dev/_devcli.py`（7 个开发期脚本共用：出片 6 个 + 碰撞审计 1 个） | `outputs/dev/<run 名>/` |
@@ -270,9 +281,11 @@ web2robot/
 | `scripts/dev/run_collcal_ab.sh` | `outputs/retarget/collcmp_cal/<短名>_grid/`（`_neural` 是软链到 `collcmp/` 的旧跑，因为那条路线按构造没变） |
 | `python -m web2robot.twin`（物体位姿单跑） | `outputs/twin/<片段名>/`（`object_poses.npz` + `.json` + `--viz` 时的 `object_viz.mp4`）。走 `test.py --object_tracking on` 时不落这里，`object_poses.npz` 直接落那次重定向的 `--out` 目录，和 `root_frames.npz` 同级同命名 |
 | `test.py --action_refine`（动作精修判决） | 落那次重定向自己的 `--out` 目录：`action_refine.json` / `action_refine.npz` / `hand_poses.npz`。**不新建顶层目录** —— 判决只对那一次 run 有意义，和它的轨迹放一起才对得上。`python -m web2robot.refine --run <目录>` 事后重判默认写回同一个目录，`--out` 可另指 |
+| `scripts/s5_hand_mask.sh` | `outputs/synth/<片段名>/`（`handmask_check.png` 核对图 + `hand_masks.npz` 按位打包的左右手掩码）+ `outputs/synth/handmask.jsonl`（逐段判据，一行一段） |
 | 人工封存 | `outputs/archive/<主题>_<年-月>/` |
 
 六个写入口都过 `P.check_output_dir()` 这道闸，落点在 `external/` 里就直接 `SystemExit`。
+（⓿ 和 ⑥ 这两档不经过那道闸 —— 它们只往 `--out` 写，默认值就在 `outputs/` 下。）
 
 ---
 
