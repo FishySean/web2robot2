@@ -1,4 +1,4 @@
-"""``python -m web2robot.synth`` —— 视觉合成的命令行入口，两个子命令。
+"""``python -m web2robot.synth`` —— 视觉合成的命令行入口，三个子命令。
 
     # mask：官方 MANO 网格 → 手部掩码 + 一张能用眼睛看的核对图
     scripts/s5_hand_mask.sh data/clips_official --out outputs/synth
@@ -9,11 +9,16 @@
     scripts/s6_robot_render.sh data/clips_official \\
         --runs_dir outputs/retarget/collcmp --pattern '*_grid' --out outputs/synth/render
 
+    # compose：抠人 → 补背景 → 按深度贴机器人（一帧最终画面）
+    scripts/s7_compose.sh data/clips_official \\
+        --runs_dir outputs/retarget/collcmp --pattern '*_grid' --rgb depth
+
 子命令是照 ``web2robot.perception`` 的先例加的（一个包一个 ``-m`` 入口，里面分子命令）。
 
 **背景为什么是深度图**：真 RGB 还没到位（BACKLOG B12），而 `depth.npz` 是这条链路上
 目前唯一一份真实成像 —— 手在深度图里的轮廓清清楚楚，掩码贴不贴合边缘一眼能看出来。
-RGB 到位之后把背景换成 RGB，其余不用改。
+RGB 到位之后把背景换成 RGB，其余不用改。`compose --rgb depth` 同理：那是**替身底图**，
+清单里的 `rgb_source` 会写明，别拿它当验收依据。
 
 **一段失败不拖累其他段**：每段单独 try，失败写进清单的 `error` 字段，退出码非 0，
 已成的段照样留在盘上。
@@ -31,6 +36,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from . import compose
 from .handmask import (alignment_report, frame_alignments, hand_mask, joints_inside_fraction,
                        load_hand_mesh, load_joints_2d)
 from .render import (ClipRobotRenderer, clip_camera, fovy_degrees, load_joint_trajectory,
@@ -312,26 +318,34 @@ def render_clip(clip_dir: Path, run_dir: Path, out_dir: Path, robot: str = "m7",
     return rec
 
 
+def resolve_runs(args: argparse.Namespace) -> Dict[str, Path]:
+    """`--run CLIP_ID=RUN_DIR`（优先）或 `--runs_dir` → {clip_id: run_dir}。
+
+    `render` 和 `compose` 两个子命令共用 —— 两边都要"哪段配哪份重定向产物"，
+    口径必须是同一份，不然同一条命令行在两个子命令下选出不同的产物。
+    参数不合法就抛 `ValueError`，由调用方转成退出码 2。
+    """
+    if args.runs:
+        runs: Dict[str, Path] = {}
+        for item in args.runs:
+            if "=" not in item:
+                raise ValueError(f"--run 要写成 CLIP_ID=RUN_DIR，收到 {item!r}")
+            cid, path = item.split("=", 1)
+            runs[cid] = Path(path)
+        return runs
+    if args.runs_dir:
+        return discover_runs(Path(args.runs_dir), args.pattern)
+    raise ValueError("要么给 --runs_dir，要么给 --run CLIP_ID=RUN_DIR")
+
+
 def run_render(args: argparse.Namespace) -> int:
     clips_dir = Path(args.clips_dir)
     out = Path(args.out)
 
-    runs: Dict[str, Path] = {}
-    if args.runs:
-        for item in args.runs:
-            if "=" not in item:
-                print(f"--run 要写成 CLIP_ID=RUN_DIR，收到 {item!r}", file=sys.stderr)
-                return 2
-            cid, path = item.split("=", 1)
-            runs[cid] = Path(path)
-    elif args.runs_dir:
-        try:
-            runs = discover_runs(Path(args.runs_dir), args.pattern)
-        except ValueError as exc:
-            print(exc, file=sys.stderr)
-            return 2
-    else:
-        print("要么给 --runs_dir，要么给 --run CLIP_ID=RUN_DIR", file=sys.stderr)
+    try:
+        runs = resolve_runs(args)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
         return 2
 
     dirs = [p for p in _clip_dirs(clips_dir, args.clips) if p.name in runs]
@@ -376,6 +390,157 @@ def run_render(args: argparse.Namespace) -> int:
     return 0 if failed == 0 else 1
 
 
+# ── compose：抠人 → 补背景 → 按深度贴机器人 ─────────────────────────────────
+
+def compose_montage(rows: List[List[np.ndarray]], out_png: Path, labels: List[str]) -> None:
+    """核对图：每行一帧，三列 = 原画面 / 抠完人补好背景 / 合成结果（都是 BGR）。
+
+    三列并排是**这一块唯一有意义的看法**：只看最后一列分不清"机器人贴歪了"和
+    "人没抠干净"，中间那列把两件事分开。
+    """
+    import cv2
+    tiles = []
+    for lab, row in zip(labels, rows):
+        annotated = []
+        for col, img in zip(("原画面", "抠人+背景", "合成"), row):
+            c = img.copy()
+            cv2.putText(c, f"{lab} {col}", (6, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        (255, 255, 255), 1, cv2.LINE_AA)
+            annotated.append(c)
+        tiles.append(np.hstack(annotated))
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_png), np.vstack(tiles))
+
+
+def compose_clip(clip_dir: Path, run_dir: Path, out_dir: Path, robot: str = "m7",
+                 rgb_spec: str = "auto", plate_mode: str = "auto",
+                 person_mask_dir: Optional[Path] = None, hand_masks: Optional[Path] = None,
+                 dilate_px: int = compose.DEFAULT_DILATE_PX, tol_m: float = compose.DEPTH_TOL_M,
+                 no_depth_order: bool = False, video: bool = True, n_rows: int = 3) -> Dict:
+    """合一整段：核对图 + （可选）视频，并返回统计。"""
+    import cv2
+
+    n = clip_frames(clip_dir)
+    camera = clip_camera(clip_dir)
+    rgb, rgb_src = compose.load_rgb(rgb_spec, clip_dir, n, camera)
+    erased, mask_src = compose.load_person_mask(clip_dir, n, camera, hand_masks=hand_masks,
+                                                person_dir=person_mask_dir, dilate_px=dilate_px)
+    plate, plate_info = compose.background_plate(rgb, erased, mode=plate_mode)
+    scene = None if no_depth_order else compose.scene_depth_m(clip_dir, n)
+
+    R_pf, t_pf = load_root_frames(run_dir, n)
+    traj = load_joint_trajectory(run_dir, n)
+    take = set(np.linspace(0, n - 1, n_rows).round().astype(int).tolist())
+
+    rows: Dict[int, List[np.ndarray]] = {}
+    frames: List[np.ndarray] = []
+    vis_area, occluded = [], []
+    overridden = []
+    with ClipRobotRenderer(camera, robot=robot) as rd:
+        for t in range(n):
+            f = rd.render(
+                R_pf[t], t_pf[t], traj["q_left"][t], traj["q_right"][t],
+                None if traj["q_left_fingers"] is None else traj["q_left_fingers"][t],
+                None if traj["q_right_fingers"] is None else traj["q_right_fingers"][t],
+                traj["left_finger_joint_names"], traj["right_finger_joint_names"])
+            plate_t = plate[min(t, len(plate) - 1)]
+            scene_t = None if scene is None else scene[t]
+            out, vis = compose.compose_frame(rgb[t], plate_t, erased[t], f, scene_t, tol=tol_m)
+            vis_area.append(float(vis.mean()))
+            # 被场景挡掉的比例：机器人掩码里没画出来的那部分（判深度排序有没有在起作用）
+            occluded.append(float((f.mask & ~vis).sum() / max(int(f.mask.sum()), 1)))
+            # 「抠掉的区域内无条件画机器人」这条例外影响了多大面积（它有代价，见 compose.py）
+            overridden.append(compose.override_fraction(f, scene_t, erased[t], tol=tol_m))
+            bgr = out[:, :, ::-1]
+            if video:
+                frames.append(np.ascontiguousarray(bgr))
+            if t in take:
+                erased_only = rgb[t].copy()
+                erased_only[erased[t]] = plate_t[erased[t]]
+                rows[t] = [np.ascontiguousarray(rgb[t][:, :, ::-1]),
+                           np.ascontiguousarray(erased_only[:, :, ::-1]),
+                           np.ascontiguousarray(bgr)]
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    order = sorted(rows)
+    png = out_dir / "compose_check.png"
+    compose_montage([rows[t] for t in order], png, [f"t={t}" for t in order])
+    rec: Dict = {
+        "png": str(png),
+        "frames": order,
+        "rgb_source": rgb_src,
+        "person_mask_source": mask_src,
+        "erased_fraction": float(erased.mean()),
+        "plate": plate_info,
+        "depth_order": "off" if scene is None else "depth.npz",
+        "depth_tol_m": tol_m,
+        "robot_visible_fraction": float(np.mean(vis_area)),
+        "robot_occluded_fraction": float(np.mean(occluded)),
+        "robot_override_fraction": float(np.mean(overridden)),
+    }
+    if video:
+        mp4 = out_dir / "compose.mp4"
+        _write_h264(mp4, frames, traj["fps"])
+        rec["mp4"] = str(mp4)
+    return rec
+
+
+def run_compose(args: argparse.Namespace) -> int:
+    clips_dir = Path(args.clips_dir)
+    out = Path(args.out)
+
+    try:
+        runs = resolve_runs(args)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    dirs = [p for p in _clip_dirs(clips_dir, args.clips) if p.name in runs]
+    if not dirs:
+        print(f"{clips_dir} 里没有和重定向产物对得上的片段（产物覆盖 {len(runs)} 段）",
+              file=sys.stderr)
+        return 1
+
+    out.mkdir(parents=True, exist_ok=True)
+    records, failed = [], 0
+    for i, clip in enumerate(dirs, 1):
+        run_dir = runs[clip.name]
+        print(f"[{i}/{len(dirs)}] {clip.name}  ← {run_dir}")
+        rec: Dict = {"clip_id": clip.name, "run_dir": str(run_dir), "robot": args.robot}
+        try:
+            rec["n_frames"] = clip_frames(clip)
+            rec["compose"] = compose_clip(
+                clip, run_dir, out / clip.name, robot=args.robot, rgb_spec=args.rgb,
+                plate_mode=args.plate, dilate_px=args.dilate, tol_m=args.depth_tol,
+                person_mask_dir=None if args.mask_dir is None else Path(args.mask_dir),
+                hand_masks=None if args.hand_masks is None else Path(args.hand_masks),
+                no_depth_order=args.no_depth_order, video=not args.no_video)
+            c = rec["compose"]
+            print(f"    背景板 {c['plate']['mode']}"
+                  + (f"（相机运动分 {c['plate']['motion_score']}）"
+                     if "motion_score" in c["plate"] else "")
+                  + f"  抠掉 {c['erased_fraction']:.3f}"
+                  f"  机器人露出 {c['robot_visible_fraction']:.3f}"
+                  f"  被场景挡掉 {c['robot_occluded_fraction']:.3f}"
+                  f"  例外覆盖 {c['robot_override_fraction']:.3f}")
+            if "替身" in c["rgb_source"]:
+                print("    ⚠ 底图是深度替身，不是真画面（BACKLOG B12），别拿它当验收依据")
+        except Exception as exc:                       # 一段坏不拖累其他段
+            failed += 1
+            rec["error"] = f"{type(exc).__name__}: {exc}"
+            print(f"    失败：{rec['error']}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+        records.append(rec)
+
+    _write_jsonl(out / "compose.jsonl", records)
+    ok = [r for r in records if "error" not in r]
+    if ok:
+        print(f"\n{len(ok)}/{len(records)} 段成功；机器人露出面积均值 "
+              f"{np.mean([r['compose']['robot_visible_fraction'] for r in ok]):.3f}")
+    print(f"清单 {out / 'compose.jsonl'}")
+    return 0 if failed == 0 else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="python -m web2robot.synth",
@@ -409,6 +574,36 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--npz", action="store_true",
                    help="把逐帧深度（uint16 毫米）和掩码存下来给下一步合成用")
     r.set_defaults(fn=run_render)
+
+    c = sub.add_parser("compose", help="抠人 → 补背景 → 按深度把机器人贴回原画面")
+    c.add_argument("clips_dir", help="片段库目录")
+    c.add_argument("--runs_dir", default=None, help="重定向产物根目录（同 render）")
+    c.add_argument("--pattern", default="*", help="只认名字匹配这个 glob 的子目录")
+    c.add_argument("--run", action="append", dest="runs", default=None,
+                   help="显式指定：--run CLIP_ID=RUN_DIR，可重复；比 --runs_dir 优先")
+    c.add_argument("--out", default="outputs/synth/compose", help="产物根目录")
+    c.add_argument("--clip", action="append", dest="clips", default=None,
+                   help="只处理这些片段 id，可重复")
+    c.add_argument("--robot", default="m7", help="机器人（目前只验过 m7）")
+    c.add_argument("--rgb", default="auto",
+                   help="底图：auto（找 outputs/fetch/<片段>/rgb.mp4）/ depth（深度替身，"
+                        "**不是真画面**，只为把链路跑通）/ 一个 mp4 路径 / 一个图片目录")
+    c.add_argument("--plate", default="auto", choices=("auto", "median", "inpaint"),
+                   help="背景板：median（相机不动，时间中值）/ inpaint（相机在动，逐帧）"
+                        "/ auto（按相邻帧差猜 —— 有第②步路由的相机标签时请直接指定）")
+    c.add_argument("--mask_dir", default=None,
+                   help="外部人形掩码目录（逐帧图片，>0 即前景）。不给就退回手部掩码并集 ——"
+                        "那**只有手，不是整个人**，整人分割要 RGB（B12）")
+    c.add_argument("--hand_masks", default=None,
+                   help="hand_masks.npz 路径（默认 outputs/synth/<片段>/hand_masks.npz）")
+    c.add_argument("--dilate", type=int, default=compose.DEFAULT_DILATE_PX,
+                   help=f"人形掩码膨胀半径（像素，默认 {compose.DEFAULT_DILATE_PX}）")
+    c.add_argument("--depth_tol", type=float, default=compose.DEPTH_TOL_M,
+                   help=f"深度排序容差（米，默认 {compose.DEPTH_TOL_M}）")
+    c.add_argument("--no_depth_order", action="store_true",
+                   help="不排序，机器人整个盖在最上层（做对照，看深度排序到底改了什么）")
+    c.add_argument("--no_video", action="store_true", help="只出核对图，不出整段视频")
+    c.set_defaults(fn=run_compose)
     return ap
 
 

@@ -80,7 +80,10 @@ M7 人形机器人）的关节角轨迹 —— 可以直接当模仿学习的训
 `frames_index.json` 自证。**目录名里的秒数不可信**（实测有一段差 3.39 s ≈ 102 源帧），
 只认 `scene.json`。细节见 [`src/web2robot/fetch/README.md`](src/web2robot/fetch/README.md)。
 
-⑥ 才刚开第一块（手部掩码）。素材清单和还缺什么见
+⑥ 三块都已跑通（手部掩码 → 按片段相机渲机器人 → 抠人补背景按深度合成），8 段官方片段
+端到端出片；但**底图现在是深度替身、抠掉的只有手**，因为真 RGB 还卡在 BACKLOG B12，
+整人分割的输入也是 RGB。所以现在能说的是"规则对、链路通"，**不是"画面对"** ——
+三层判据怎么分见 [`docs/VERIFICATION.md`](docs/VERIFICATION.md) ⑧。素材清单和还缺什么见
 [`docs/VISUAL_SYNTH_INPUTS.md`](docs/VISUAL_SYNTH_INPUTS.md) —— 简单说：深度、物体掩码、
 接触信号、MANO 手部网格官方都给了，**没有的是人体/手臂掩码和 RGB 本身**。
 掩码这一块有个实测发现值得记住：官方 3D 手直接投影**对不上画面**（和官方
@@ -296,7 +299,7 @@ outputs/retarget/xxx/
 ### 先跑测试确认环境是好的（秒级，不需要 GPU）
 
 ```bash
-envs/rt_env/bin/python -m unittest discover -s tests -v     # 448 个用例，约 70 秒
+envs/rt_env/bin/python -m unittest discover -s tests -v     # 480 个用例，约 70 秒
 ```
 
 ### 跑一遍流水线
@@ -325,6 +328,10 @@ scripts/s5_hand_mask.sh data/clips_official --out outputs/synth
 # ⑥ 按片段那台相机把机器人渲出来（彩色 + 深度 + 掩码，给合成用）
 scripts/s6_robot_render.sh data/clips_official \
     --runs_dir outputs/retarget/collcmp --pattern '*_grid' --out outputs/synth/render --npz
+
+# ⑥ 抠人 → 补背景 → 按深度贴机器人（--rgb depth 是替身底图，真 RGB 到了换成 --rgb auto）
+scripts/s7_compose.sh data/clips_official \
+    --runs_dir outputs/retarget/collcmp --pattern '*_grid' --rgb depth
 ```
 
 跑完**一定要打开 `robot_sim.mp4` 看一眼**。这个工程有一条贯穿全流程的规矩：

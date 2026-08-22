@@ -208,6 +208,8 @@ B3 定的路线（YouTube ID + 起止秒数 → 下载原片 → 截取）里，
 | C22 | `--quality_gate external` / `--routing external` 第三档 | 2026-08-21 明确**先不加**：现在没有对接对象，不知道公司那套质检输出什么格式的判决，先留一个名字会有人去实现它。开关的取值集合只写在 `src/web2robot/quality/config.py` 的 `GATE_MODES` / `ROUTING_MODES` 两个常量里，加档就改那一处（argparse 的 choices 和单测都引用它，`tests/test_quality_switch.py::test_no_external_mode_yet` 把"现在只有两档"钉住了，加档时会红，那是提醒不是故障）。接的时候要想清楚的是：`external` 读进来的判决要映射到 `Verdict` 的哪一档，以及它给不给 `suggested_route` |
 | C23 | G1 接入（原 B7） | **2026-08-22 用户明确：G1 完全搁置，不投入任何精力**，连"先用 upstream 官方 G1 + 官方 ckpt 出数据、不做我们的碰撞过滤"这个折中也不做。现阶段只做 M7 一条线。要续的话素材是现成的：upstream `external/EgoInfinity/retarget/sim/robots/g1/`（config/env/sample_config）+ 官方权重 `/mnt/vlm/fanshaoheng/EgoInfinity/retarget/ckpts/g1.pt`；我们缺的是 MJCF、`hand_frame` 约定（M7 那次就是这里转错手掌，见 memory `m7-handframe-convention`）、碰撞覆盖和 `configs/robots/g1.yaml`。按 M7 的经验，真正花时间的是 hand_frame + 自碰撞标定，不是跑通 |
 | C24 | 批量转换公司 exo 语料（原 B8） | **2026-08-22 用户明确：现在不做批量转换**，也不需要去确认内部语料库在哪。所以并行调度 / 断点续跑 / 按 shard 切分这些架构决定一并推后 —— 规模没定之前写哪套都是猜。现在的范围就是"少量官方示例片段"（`data/clips_official/` 15 段 + HF 那 106 段可扩） |
+| C25 | 背景板 `auto` 那个阈值是**惯例，而且在替身底图上标不了** | `synth/compose.py` 的 `STATIC_MOTION_THRESH = 3.0`（相邻帧灰度平均绝对差，0–255）判"相机算不算不动"，决定走时间中值还是逐帧 inpaint。**这个数没标定过，同 C19 的性质**；更麻烦的是现在标不了 —— 底图是深度替身（B12），深度图比 RGB 平滑得多，8 段官方片段量出来的分是 **0.70–2.28，全在阈值以下，于是 8 段全走了中值**。真 RGB 的纹理会把这个分整体抬上去，阈值必须**在真画面上重新扫**。缓解措施已经就位：分数写进 `compose.jsonl` 的 `plate.motion_score`，回头能批量回扫；而且 `--plate median|inpaint` 可以显式指定 —— 第②步路由本来就在判 `camera_motion`，**有那个标签时就不该靠这里猜**（接法见 C14） |
+| C26 | 「被抠掉的区域内无条件画机器人」这条例外的代价，现在只有 2%，但会跟着人形掩码一起长 | 深度排序有一条例外：人形掩码内不判遮挡（那块地方 `depth.npz` 存的是**人手自己的深度**，人已经擦掉了，拿它挡机器人等于让一个不存在的东西遮住机器人）。代价是掩码（还带 3 px 膨胀）溢到**真的比机器人近**的东西上时，机器人会盖住那个东西 —— 手按在桌上，膨胀那几像素就落到桌沿。**已经量了**：`compose.jsonl` 的 `robot_override_fraction`，8 段是 0.009–0.049（均值约 0.02），也就是机器人像素里约 2% 是靠这条例外画出来的，现在可忽略。**但这个数会跟着人形掩码变大** —— 换成整人分割（B12 之后）之后擦除区域大一个量级，溢出的近处物体也多。要续的做法：重量一次这个数，超过 5% 就把例外收紧成"只在人手自己的深度附近生效"（拿 `depth.npz` 在掩码内的分位数当参考面）。**先量，不先改** |
 
 ## D. 不是技术活，但会忘
 
@@ -229,12 +231,6 @@ B3 定的路线（YouTube ID + 起止秒数 → 下载原片 → 截取）里，
   拿到之后：丢到 `assets/robots/urdf.tar.gz`，`--force` 重建，产物应当和现在的逐字节相同
   （脚本七步自检会自己核对），顺手把它提交进去，下次就不会再丢。
 - 请人 `chown fanshaoheng` memory 目录里那 6 个 root 所有的文件（现在改不动）。
-- **GitLab 还欠一次 push**（2026-08-22 起，8/23 又试两次仍然不通）：`890d857` 及之前的
-  17 个提交已经推到 `github`/`github2` 两个 remote 的 `main`，但 `origin`
-  （`gitlab.robotera.com`）服务端在报 `Internal API unreachable`（GitLab Shell 连不上
-  自己的内部 API，https 也是 SSL EOF）—— **不是权限问题也不是本地问题**，两天里重试五次
-  都一样。等它恢复后补一条：`git push origin main:web2robot`
-  （**落点是 `web2robot` 分支，不是 `main`**，本地 `main` 跟踪的就是 `origin/web2robot`）。
 
 ---
 

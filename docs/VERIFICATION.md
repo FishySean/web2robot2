@@ -9,7 +9,7 @@
 **所有模块共通的最后一步：出片，用眼睛看。** 指标 ≠ 画面。
 
 ```bash
-envs/rt_env/bin/python -m unittest discover -s tests -v     # 秒级，全套 448 个用例
+envs/rt_env/bin/python -m unittest discover -s tests -v     # 秒级，全套 480 个用例
 ```
 
 ---
@@ -26,6 +26,7 @@ envs/rt_env/bin/python -m unittest discover -s tests -v     # 秒级，全套 44
 | ⑤碰撞 / 轨迹 | **逐位相同** | 纯 CPU 有限差分，没有随机源 |
 | ⑥手部掩码 | 官方 2D 关节落在掩码里的比例，**指尖/非指尖分开报** + 核对图用眼睛看 | 指尖骨节点本来就在网格外，混着算会把"几何本来如此"当成"掩码错位" |
 | ⑦机器人渲染 | 手腕落点错位**拆成"我方链路 / 官方数据自相矛盾"两段**分别报中位 + 核对图 | 官方 3D 手和 2D 关节自己就差 9 px（B13），合成一个数报会把别人的账记到我们头上 |
+| ⑧深度合成 | **规则 / 链路 / 画面三层分开报**，前两层现在验，第三层明说欠 | 底图是深度替身、抠掉的只有手，把"链路通了"说成"画面对了"就是虚报 |
 | M7 机器人定义 | 两个验收脚本输出逐字节一致 | 资产是静态的，任何变化都该是有意的 |
 | 新加一台机器人 | 生成脚本七步自检 + **表 vs 自己的 MJCF** + 老机器人逐字节不变 | 两台同构机器人之间不许互当真源，见下 |
 | `evidence/` 里的数 | 断言**具体数值**，不是大于小于 | 防的是论文数字和证据脱钩 |
@@ -382,6 +383,83 @@ envs/rt_env/bin/python scripts/dev/attrib_wrist_offset.py \
 
 **这一档还欠什么**：量的是手腕落点，不是整台机器人贴得对不对；核对图的底图还是深度。
 真正的复验等真 RGB（BACKLOG B12）。
+
+---
+
+## ⑧视觉合成 · 抠人补背景按深度贴机器人（`src/web2robot/synth/compose.py`，2026-08-23）
+
+第三块把前两块的零件拼成一帧最终画面。共享点只有一个：`synth/cli.py`（多一个
+`compose` 子命令、`run_render()` 里那段参数解析抽成 `resolve_runs()` 给两边共用），
+所以"没破坏现有行为"这一半还是**逐字节**证的。
+
+```bash
+envs/rt_env/bin/python -m unittest tests.test_synth_compose -v         # 32 个用例，约 1 秒
+bash scripts/dev/check_synth_compose_bytes.sh \
+     > outputs/dev/synth_compose_bytecheck.log 2>&1                    # mask/render 两条路一字节没变
+scripts/s7_compose.sh data/clips_official \
+     --runs_dir outputs/retarget/collcmp --pattern '*_grid' \
+     --rgb depth --out outputs/synth/compose                           # 8 段，约 5 分钟
+```
+
+**没破坏现有行为**：`check_synth_compose_bytes.sh` 拿 `git archive HEAD` 抽出旧 `src/`，
+新旧各跑一遍 **mask 全 10 段**（20 个 PNG/NPZ）和 **render 全 8 段**（PNG + MP4 + NPZ），
+逐字节相同，两份清单归一化 `--out` 前缀后也逐字节相同。抽函数看着无害，但
+`resolve_runs()` 就在 `render` 的入口路径上，所以这一条不能只靠单测。
+（脚本里 `run_old` 必须显式给 `WEB2ROBOT_ROOT` —— `paths.P` 是按模块位置往上找
+`configs/` 的，`git archive` 抽出来的树只有 `src/`。这不削弱隔离性：变量只影响
+configs/assets 的定位，那些本次一字没动，唯一自变量还是 `src/`。）
+
+**判据分三层，前两层现在就能验，第三层必须等真 RGB**：
+
+| 层 | 判据 | 现在能不能验 |
+|---|---|---|
+| 规则对不对 | 深度排序那两条例外、抠人和贴机器人的先后、毫米/米换算 | ✅ 单测（合成输入，数字精确可算） |
+| 链路通不通 | 8 段官方片段全跑出画面 + 视频 + 清单，不崩不静默降级 | ✅ 实跑 |
+| 画面像不像 | 人抠干净了没有、背景补得自然不自然 | ❌ **等 B12**（底图是深度替身，而且"抠人"只抠了手） |
+
+**实测**（`outputs/synth/compose/compose.jsonl`，8 段，`--rgb depth`）：
+
+| 片段 | 背景板 | `motion_score` | 抠掉画面 | 机器人露出 | 被场景挡掉 | 例外覆盖 |
+|---|---|---|---|---|---|---|
+| `--oo8_XIuOM_799.5_809.8` | median | 1.66 | 3.3% | 7.0% | 38.2% | 4.9% |
+| `--oo8_XIuOM_900.3_917.4` | median | 1.58 | 1.6% | 5.5% | 69.1% | 1.8% |
+| `-0RheyDV3a0_48.6_55.3` | median | 0.70 | 1.7% | 7.5% | 60.6% | 1.9% |
+| `-1r9yl-P-Ao_231.8_241.5` | median | 2.11 | 2.2% | 11.8% | 27.2% | 2.5% |
+| `-1r9yl-P-Ao_60.4_68.4` | median | 2.10 | 2.2% | 10.9% | 29.0% | 1.7% |
+| `-1r9yl-P-Ao_86.3_90.8` | median | 2.28 | 1.8% | 17.8% | 22.3% | 1.7% |
+| `-20k07PjLTA_48.0_52.4` | median | 1.81 | 3.4% | 14.3% | 36.5% | 0.9% |
+| `-2cNMO9Mm3Q_192.4_209.2` | median | 1.12 | 1.1% | 11.5% | 23.9% | 1.5% |
+
+三个数各自说明什么：
+
+- **抠掉画面 1.1–3.4%**：这就是"抠人"目前的全部覆盖面 —— **只有手**。整人分割要跑
+  Mask R-CNN，而它的输入就是 RGB（B12）。所以合成结果里**人还在画面里**，这是已知占位，
+  不是 bug；接口 `--mask_dir` 留着，谁产的人形掩码都能塞进来。
+- **被场景挡掉 22–69%**：机器人像素里被场景深度挡住的比例。这个数**现在被"人还在画面里"
+  抬高了** —— 挡住机器人的很大一部分就是那个没被抠掉的人（他比机器人近）。换成整人掩码
+  之后应当大幅下降。
+- **例外覆盖 0.9–4.9%**：只因为"落在被抠掉的区域内"这条例外才画出来的机器人像素。
+  例外的代价现在可忽略，但会跟着人形掩码一起长（BACKLOG **C26**）。
+
+**唯一一处对照实验：深度排序到底改了什么。** 同一段、同一份轨迹，只把 `--no_depth_order`
+打开：机器人露出从 **17.8% 涨到 23.0%**，被场景挡掉从 22.3% 变成 0。核对图上看得很清楚 ——
+不排序时机器人的腰部立柱和下半身**画在桌子前面**，排序打开后桌子正确地挡住了它们。
+（`outputs/dev/compose_nodepth/`，只出核对图不出视频。）
+
+```bash
+scripts/s7_compose.sh data/clips_official --runs_dir outputs/retarget/collcmp \
+    --pattern '*_grid' --rgb depth --no_depth_order --no_video \
+    --out outputs/dev/compose_nodepth --clip=-1r9yl-P-Ao_86.3_90.8
+```
+
+**背景板那条 `auto` 判据现在没有区分力**：8 段的 `motion_score` 是 0.70–2.28，全在阈值
+3.0 以下，于是 8 段全走了中值。深度图比 RGB 平滑得多，这个阈值**在替身底图上标不了**，
+必须在真画面上重新扫（BACKLOG **C25**）。有第②步路由的 `camera_motion` 标签时应当用
+`--plate median|inpaint` 直接指定，不靠猜。
+
+**这一档还欠什么**：① 真 RGB（B12）—— 缺它就只有"规则对、链路通"，没有"画面像"；
+② 人形掩码只到手（同样等 B12）；③ 背景板阈值待标定（C25）；④ 例外覆盖面待重量（C26）。
+换 RGB 不需要改代码：`--rgb auto` 会去找 `outputs/fetch/<片段>/rgb.mp4`。
 
 ---
 

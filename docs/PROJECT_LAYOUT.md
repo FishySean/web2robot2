@@ -21,6 +21,7 @@
 | 官方片段对应的原片画面 | `scripts/s0_fetch_rgb.sh`（`src/web2robot/fetch/`）—— 起止时刻**只认 `scene.json` 的 `video_source`**，目录名里的秒数实测不可信 |
 | 画面里的人手在哪（掩码） | `scripts/s5_hand_mask.sh`（`src/web2robot/synth/`）—— 官方 MANO 网格投影后**必须逐帧对齐**才和画面对得上，素材清单见 [`VISUAL_SYNTH_INPUTS.md`](VISUAL_SYNTH_INPUTS.md) |
 | 机器人怎么渲成"和画面同一台相机" | `scripts/s6_robot_render.sh`（`src/web2robot/synth/render.py`）—— 内参走 fovy、外参从 `root_frames.npz` 反解；判据和归因见 [`VERIFICATION.md`](VERIFICATION.md) ⑦ |
+| 抠人 → 补背景 → 按深度贴机器人 | `scripts/s7_compose.sh`（`src/web2robot/synth/compose.py`）—— 深度排序有两条**必须有的例外**（写在模块 docstring 里）；判据见 [`VERIFICATION.md`](VERIFICATION.md) ⑧ |
 | 机器人 MJCF / mesh | `assets/robots/<机器人名>/`（`m7`、`l3_4`） |
 | 机器人参数（关节限位 / 静息姿态 / 碰撞盒与门槛） | `configs/robots/<机器人名>.yaml` —— **一台机器人一个文件，代码里不留第二份**；每组带 `verified` 说明是不是实测标定的 |
 | 想跳过质检/路由（公司自己有一套） | `--quality_gate skip` / `--routing skip`，取值集合只写在 `src/web2robot/quality/config.py` 的 `GATE_MODES` / `ROUTING_MODES`；默认 `builtin` = 行为不变 |
@@ -87,7 +88,12 @@ web2robot/
 │   │   │                        两个坑：场景 XML 要用 robot-only 的 m7.xml（scene_vis
 │   │   │                        那块无限地板会糊满画面）；**写完 model.cam_pos 必须补
 │   │   │                        mj_camlight**，否则第 0 帧从世界原点拍、之后每帧慢一拍
-│   │   └── cli.py               两个子命令：`mask` / `render`
+│   │   ├── compose.py           第三块：抠人 → 补背景 → **按深度**贴机器人。背景板两条路
+│   │   │                        （相机不动=时间中值 / 相机在动=cv2.inpaint）；深度排序有
+│   │   │                        两条必须有的例外：被抠掉的人形区域内无条件画机器人（那里
+│   │   │                        depth.npz 存的是**人手自己的深度**）、场景深度为 0 的像素
+│   │   │                        不判遮挡。机器人**现渲**，因为 robot_render.npz 没有彩色
+│   │   └── cli.py               三个子命令：`mask` / `render` / `compose`
 │   │                            核对图的底是深度 —— 真 RGB 还卡在 BACKLOG B12
 │   └── eval/                    评测代码（给 evidence/ 算表用，纯 numpy、秒级）
 │
@@ -98,10 +104,12 @@ web2robot/
 │   ├── s4_retarget.sh           ④＋⑤（调上游主流程，碰撞/清洗走我方包）
 │   ├── s5_hand_mask.sh          ⑥第一块（`--no_align` 是对照开关，不是省事开关）
 │   ├── s6_robot_render.sh       ⑥第二块（一段同时有 _grid/_neural 会报错让你挑，不替你选）
+│   ├── s7_compose.sh            ⑥第三块（`--rgb depth` 是替身底图，**不是真画面**；
+│   │                            `--no_depth_order` 是对照开关，看深度排序改了什么）
 │   └── dev/                     开发期工具：check_* 回归比对、render_*/viz_* 出片、
 │                                 build_l3_4_assets.py（从厂家原包生成 L3.4 资产）
 │
-├── tests/                   ← stdlib unittest，秒级，448/448
+├── tests/                   ← stdlib unittest，秒级，480/480
 │   └── regression/              回归基准片段 + 期望判决（qc.jsonl / contact_sheet.png）
 │
 ├── configs/
@@ -133,7 +141,9 @@ web2robot/
 │   ├── synth/                   ⑥的产物：<片段>/handmask_check.png（深度底的核对图）+
 │   │                            hand_masks.npz（左右手按位打包）+ handmask.jsonl（逐段判据）；
 │   │                            render/<片段>/robot_render_check.png + robot_render.mp4 +
-│   │                            robot_render.npz（depth_mm + mask）+ render.jsonl
+│   │                            robot_render.npz（depth_mm + mask）+ render.jsonl；
+│   │                            compose/<片段>/compose_check.png（原画面/抠人/合成三列）+
+│   │                            compose.mp4 + compose.jsonl
 │   ├── clips/                   ③的产物：EgoInfinity clip 目录
 │   ├── retarget/                ④⑤的产物：trajectory.npz / robot_sim.mp4 / input_viz.mp4
 │   ├── twin/                    物体位姿单跑的产物：object_poses.npz / .json / object_viz.mp4
@@ -293,6 +303,7 @@ web2robot/
 | `test.py --action_refine`（动作精修判决） | 落那次重定向自己的 `--out` 目录：`action_refine.json` / `action_refine.npz` / `hand_poses.npz`。**不新建顶层目录** —— 判决只对那一次 run 有意义，和它的轨迹放一起才对得上。`python -m web2robot.refine --run <目录>` 事后重判默认写回同一个目录，`--out` 可另指 |
 | `scripts/s5_hand_mask.sh` | `outputs/synth/<片段名>/`（`handmask_check.png` 核对图 + `hand_masks.npz` 按位打包的左右手掩码）+ `outputs/synth/handmask.jsonl`（逐段判据，一行一段） |
 | `scripts/s6_robot_render.sh` | `outputs/synth/render/<片段名>/`（`robot_render_check.png` 九宫格核对图 + `robot_render.mp4` + `--npz` 时的 `robot_render.npz`）+ `outputs/synth/render/render.jsonl`（逐段手腕对齐判据） |
+| `scripts/s7_compose.sh` | `outputs/synth/compose/<片段名>/`（`compose_check.png` 三列核对图 + `compose.mp4`）+ `outputs/synth/compose/compose.jsonl`（逐段合成判据） |
 | 人工封存 | `outputs/archive/<主题>_<年-月>/` |
 
 六个写入口都过 `P.check_output_dir()` 这道闸，落点在 `external/` 里就直接 `SystemExit`。
