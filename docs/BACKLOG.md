@@ -216,11 +216,11 @@ B3 定的路线（YouTube ID + 起止秒数 → 下载原片 → 截取）里，
   拿到之后：丢到 `assets/robots/urdf.tar.gz`，`--force` 重建，产物应当和现在的逐字节相同
   （脚本七步自检会自己核对），顺手把它提交进去，下次就不会再丢。
 - 请人 `chown fanshaoheng` memory 目录里那 6 个 root 所有的文件（现在改不动）。
-- **GitLab 还欠一次 push**（2026-08-22）：`48046e9` 及之前的 14 个提交已经推到
-  `github`/`github2` 两个 remote 的 `main`，但 `origin`（`gitlab.robotera.com`）
-  服务端在报 `Internal API unreachable`（GitLab Shell 连不上自己的内部 API，
-  https 也是 SSL EOF）—— **不是权限问题也不是本地问题**，重试三次都一样。
-  等它恢复后补一条：`git push origin main:web2robot`
+- **GitLab 还欠一次 push**（2026-08-22 起，8/23 再试一次仍然不通）：`1f4b7d6` 及之前的
+  15 个提交已经推到 `github`/`github2` 两个 remote 的 `main`，但 `origin`
+  （`gitlab.robotera.com`）服务端在报 `Internal API unreachable`（GitLab Shell 连不上
+  自己的内部 API，https 也是 SSL EOF）—— **不是权限问题也不是本地问题**，两天里重试四次
+  都一样。等它恢复后补一条：`git push origin main:web2robot`
   （**落点是 `web2robot` 分支，不是 `main`**，本地 `main` 跟踪的就是 `origin/web2robot`）。
 
 ---
